@@ -39,7 +39,7 @@
 namespace okvis
 {
 
-static const int cameraInputQueueSize = 2;
+static const int cameraInputQueueSize = 10;
 
 // overlap of imu data before and after two consecutive frames [seconds]:
 static const double imuTemporalOverlap = 0.02;

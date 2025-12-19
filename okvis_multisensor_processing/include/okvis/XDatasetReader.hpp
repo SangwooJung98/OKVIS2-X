@@ -23,6 +23,8 @@
 #include <fstream>
 #include <atomic>
 #include <thread>
+#include <map>
+#include <mutex>
 
 #include <glog/logging.h>
 
@@ -78,6 +80,9 @@ namespace okvis {
         /// @brief Check if currently reading the dataset.
         /// @return True, if reading.
         virtual bool isStreaming() final;
+
+        /// @brief Get last filename for a camera (for color saving).
+        virtual bool getLastImageFilename(size_t camIdx, std::string& filename) const override;
 
         /// @brief Get the completion fraction read already.
         /// @return Fraction read already.
@@ -138,6 +143,10 @@ namespace okvis {
         int numCameras_ = -1;
         size_t depthCameraId_ = 0;
         okvis::Time t_gps_; ///< Timestamp of the last gps signal received
+
+        // keep last filenames per camera (thread-safe)
+        mutable std::mutex lastImageMutex_;
+        std::map<size_t, std::string> lastImageFilenames_;
 
     };
 

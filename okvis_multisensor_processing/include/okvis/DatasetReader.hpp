@@ -22,6 +22,8 @@
 #include <fstream>
 #include <atomic>
 #include <thread>
+#include <map>
+#include <mutex>
 
 #include <glog/logging.h>
 
@@ -81,6 +83,9 @@ public:
   /// @return Fraction read already.
   virtual double completion() const final;
 
+  /// @brief Get last filename for a camera (for color saving).
+  bool getLastImageFilename(size_t camIdx, std::string& filename) const;
+
 private:
 
   /// @brief Read the camera csv file, that maps image filenames to timestamps.
@@ -115,6 +120,10 @@ private:
   std::string gpsDataType_; ///< GPS data type: "cartesian" | "geodetic" | "geodetic-leica"
   okvis::Time t_gps_; ///< Timestamp of the last gps signal received
   std::ifstream gpsFile_; ///< Gps csv file.
+
+  // keep last filenames per camera (thread-safe)
+  mutable std::mutex lastImageMutex_;
+  std::map<size_t, std::string> lastImageFilenames_;
 
 };
 

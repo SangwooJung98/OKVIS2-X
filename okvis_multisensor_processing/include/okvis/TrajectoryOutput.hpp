@@ -22,6 +22,12 @@
 #include "okvis/QueuedTrajectory.hpp"
 #include <fstream>
 #include <memory>
+#include <string>
+#include <optional>
+#include <unordered_map>
+#include <map>
+#include <mutex>
+#include <filesystem>
 
 #include <Eigen/Core>
 
@@ -35,6 +41,9 @@
 #include <okvis/threadsafe/ThreadsafeQueue.hpp>
 #include <okvis/ViInterface.hpp>
 #include <okvis/QueuedTrajectory.hpp>
+#include <okvis/kinematics/Transformation.hpp>
+#include <okvis/cameras/NCameraSystem.hpp>
+#include <okvis/cameras/PinholeCamera.hpp>
 
 
 namespace okvis {
@@ -62,6 +71,9 @@ public:
    */
   TrajectoryOutput(const std::string & filename, bool rpg = false, bool draw = true);
 
+  /// \brief Destructor to flush/close any open files.
+  ~TrajectoryOutput();
+
   /**
    * @brief Set CSV file.
    * @param filename Write CSV trajectory to this file.
@@ -74,6 +86,39 @@ public:
    * @param filename Write CSV trajectory to this file.
    */
   void setRGBCsvFile(const std::string & filename);
+
+  /**
+   * @brief Set JSON file for trajectory (real-time JSONL stream).
+   * @param filename Write JSON trajectory to this file.
+   */
+  void setJsonFile(const std::string & filename);
+
+  /**
+   * @brief Configure JSON export with camera intrinsics/extrinsics.
+   * @param ncamera   Camera system (for intrinsics and T_SC).
+   * @param camIdx    Camera index to export.
+   * @param imagePrefix Prefix for image names (e.g., "frame").
+   * @param imageExt  File extension (e.g., "png").
+   * @param zeroPad   Zero padding for frame numbers.
+   * @return true on success.
+   */
+  bool setJsonCamera(const okvis::cameras::NCameraSystem& ncamera,
+                     size_t camIdx = 0,
+                     const std::string& imagePrefix = "frame",
+                     const std::string& imageExt = "png",
+                     int zeroPad = 6);
+
+  /**
+   * @brief Configure depth point cloud export behaviour.
+   * @param minRangeMeters Minimum accepted depth (in metres).
+   * @param maxRangeMeters Maximum accepted depth (in metres).
+   * @param depthScaleMetersPerUnit Conversion from stored depth units to metres.
+   * @param pixelStride Downsampling stride when sampling pixels.
+   */
+  void setDepthExportConfig(double minRangeMeters,
+                            double maxRangeMeters,
+                            double depthScaleMetersPerUnit = 1.0,
+                            int pixelStride = 4);
 
   /**
    * @brief Process the state (write it to trajectory file and visualise). Set as callback.
@@ -104,13 +149,70 @@ public:
    */
   bool processRGBImage(const okvis::Time &, const cv::Mat &);
 
+  /**
+   * @brief Buffer a depth image for later sparse point cloud export.
+   * @param timestamp Depth image timestamp.
+   * @param camIdx Camera index the depth image belongs to.
+   * @param depthImage Depth map (float32, metres preferred).
+   */
+  bool processDepthImage(const okvis::Time& timestamp,
+                         size_t camIdx,
+                         const cv::Mat& depthImage);
+
   /// \brief Draw the top view now.
   /// \param outImg The output image to draw into.
   void drawTopView(cv::Mat & outImg);
 
 private:
+  // helpers for image naming and timestamp mapping
+  std::string makeJsonImageName();
+  std::string nextImageName();
+  uint64_t toKey(const okvis::Time& t) const;
+  bool lookupImageName(const okvis::Time& t, std::string& name);
+  int imageIndexFromName(const std::string& name) const;
+  void appendImageList(const std::string& name, int idx);
+  bool writePointCloud(const okvis::State& state,
+                       std::shared_ptr<const okvis::MapPointVector> landmarks,
+                       const std::string& imageName);
+  bool writeDepthPointCloud(const okvis::State& state,
+                            const cv::Mat& depthImage,
+                            const std::string& imageName);
+  bool writeStateToJson(const okvis::State& state,
+                        const std::string& imageName);
+
   std::fstream csvFile_; ///< The CSV file.
   std::fstream rgbCsvFile_;  ///< The RGB CSV file.
+  std::fstream jsonFile_; ///< The JSON file (newline-delimited objects).
+  std::ofstream imageListFile_; ///< image_list.txt
+  std::string jsonDir_; ///< Directory of the JSON file.
+  std::string imagesDir_; ///< Directory to save images.
+  std::string pointCloudDir_; ///< Directory to save per-frame sparse point clouds.
+  // std::string pointCloudPlyDir_; ///< Directory to save per-frame sparse point clouds as PLY.
+  std::string imageListPath_; ///< image_list.txt path
+  bool imageListEnabled_ = false;
+  bool pointCloudEnabled_ = false; ///< Whether point cloud saving is enabled.
+  // bool pointCloudPlyEnabled_ = false; ///< Whether point cloud PLY saving is enabled.
+  std::unordered_map<uint64_t, std::string> imageNameByStamp_; ///< timestamp->image name
+  std::mutex imageMutex_; ///< protect imageNameByStamp_ and counter
+  bool jsonEnabled_ = false; ///< Whether JSON writing is enabled.
+  bool firstJsonEntry_ = true; ///< Tracks comma placement for JSON array.
+  bool jsonCameraSet_ = false; ///< Whether camera intrinsics/extrinsics are set.
+  size_t jsonFrameCounter_ = 0; ///< Frame index for image naming.
+  std::string jsonImagePrefix_ = "frame"; ///< Prefix for image names.
+  std::string jsonImageExt_ = "png"; ///< Extension for image names.
+  int jsonImageZeroPad_ = 6; ///< Zero padding for frame numbers.
+  size_t jsonCameraIdx_ = 0; ///< Camera index configured for JSON export.
+  okvis::kinematics::Transformation jsonT_SC_; ///< Camera-to-sensor transform.
+  struct JsonIntrinsics {
+    double fx = 0.0;
+    double fy = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    int width = 0;
+    int height = 0;
+    double focal = 0.0;
+    bool valid = false;
+  } jsonIntrinsics_;
   bool rpg_ = false; ///< Whether to use the RPG format (instead of EuRoC)
 
   bool draw_ = true; ///< Whether to draw a top view.
@@ -140,6 +242,19 @@ private:
 
   okvis::QueuedTrajectory<cv::Mat> rgbTrajectory_;  ///< RGB trajectory with Queue.
 
+  // depth-based sparse point cloud data
+  std::string pointCloudDepthDir_;
+  bool depthPointCloudDirReady_ = false;
+  bool depthPointCloudEnabled_ = false;
+  size_t depthCameraIdx_ = 0;
+  double depthMinRange_ = 0.2;
+  double depthMaxRange_ = 15.0;
+  double depthScaleMetersPerUnit_ = 1.0;
+  int depthPixelStride_ = 4;
+  size_t depthImageBufferSize_ = 20;
+  std::map<uint64_t, cv::Mat> depthImagesByStamp_;
+  std::mutex depthMutex_;
+
   /// \brief Convert metric coordinates to pixels.
   /// \param pointInMeters Point in [m].
   /// \return Point in [pixels].
@@ -161,6 +276,9 @@ private:
   /// \brief Write state into csv file.
   static bool writeStateToCsv(std::fstream& csvFile, const okvis::State& state,
                               const bool rpg = false);
+
+  /// \brief Write state into json file (trajectory camera-centric format).
+  bool writeStateToJson(const okvis::State& state);
 
   okvis::kinematics::Transformation _T_AW; ///< Transf. betw. this world coord. & another agent.
 

@@ -17,6 +17,12 @@
  */
 
 #include <iomanip>
+#include <sstream>
+#include <cmath>
+#include <algorithm>
+#include <glog/logging.h>
+#include <opencv2/imgcodecs.hpp>
+#include <filesystem>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -40,6 +46,13 @@ okvis::TrajectoryOutput::TrajectoryOutput(const std::string &filename, bool rpg,
   }
 }
 
+okvis::TrajectoryOutput::~TrajectoryOutput() {
+  if(jsonEnabled_ && jsonFile_.is_open()) {
+    jsonFile_ << "\n  ]\n}\n";
+    jsonFile_.close();
+  }
+}
+
 void okvis::TrajectoryOutput::setCsvFile(const std::string &filename, bool rpg) {
   rpg_ = rpg;
   createCsvFile(filename, csvFile_, rpg);
@@ -49,11 +62,217 @@ void okvis::TrajectoryOutput::setRGBCsvFile(const std::string & filename) {
   createCsvFile(filename, rgbCsvFile_, rpg_);
 }
 
+bool okvis::TrajectoryOutput::setJsonCamera(const okvis::cameras::NCameraSystem& ncamera,
+                                            size_t camIdx,
+                                            const std::string& imagePrefix,
+                                            const std::string& imageExt,
+                                            int zeroPad) {
+  if(camIdx >= ncamera.numCameras()) {
+    LOG(WARNING) << "JSON camera index " << camIdx << " out of range.";
+    return false;
+  }
+
+  auto camGeom = ncamera.cameraGeometry(camIdx);
+  if(!camGeom) {
+    LOG(WARNING) << "Camera geometry not available for index " << camIdx;
+    return false;
+  }
+
+  auto pinhole = std::dynamic_pointer_cast<const okvis::cameras::PinholeCameraBase>(camGeom);
+  if(!pinhole) {
+    LOG(WARNING) << "JSON export currently supports pinhole cameras only.";
+    return false;
+  }
+
+  jsonIntrinsics_.fx = pinhole->focalLengthU();
+  jsonIntrinsics_.fy = pinhole->focalLengthV();
+  jsonIntrinsics_.cx = pinhole->imageCenterU();
+  jsonIntrinsics_.cy = pinhole->imageCenterV();
+  jsonIntrinsics_.width = pinhole->imageWidth();
+  jsonIntrinsics_.height = pinhole->imageHeight();
+  jsonIntrinsics_.focal = jsonIntrinsics_.fx;
+  jsonIntrinsics_.valid = true;
+
+  auto T_SC_ptr = ncamera.T_SC(camIdx);
+  if(!T_SC_ptr) {
+    LOG(WARNING) << "Extrinsics (T_SC) not available for camera " << camIdx;
+    return false;
+  }
+  jsonT_SC_ = *T_SC_ptr;
+  jsonCameraSet_ = true;
+  jsonCameraIdx_ = camIdx;
+  depthCameraIdx_ = camIdx;
+  jsonImagePrefix_ = imagePrefix;
+  jsonImageExt_ = imageExt;
+  jsonImageZeroPad_ = zeroPad;
+  jsonFrameCounter_ = 0;
+  return true;
+}
+
+void okvis::TrajectoryOutput::setDepthExportConfig(double minRangeMeters,
+                                                   double maxRangeMeters,
+                                                   double depthScaleMetersPerUnit,
+                                                   int pixelStride) {
+  depthMinRange_ = std::max(0.0, minRangeMeters);
+  depthMaxRange_ = std::max(depthMinRange_ + 0.1, maxRangeMeters);
+  depthScaleMetersPerUnit_ = depthScaleMetersPerUnit;
+  depthPixelStride_ = std::max(1, pixelStride);
+  depthCameraIdx_ = jsonCameraIdx_;
+
+  if(!jsonCameraSet_) {
+    LOG(WARNING) << "[DepthPC] setDepthExportConfig() called before setJsonCamera(). Depth export disabled.";
+    depthPointCloudEnabled_ = false;
+    return;
+  }
+
+  depthPointCloudEnabled_ = depthPointCloudDirReady_;
+  if(!depthPointCloudEnabled_) {
+    LOG(WARNING) << "[DepthPC] point_cloud_depth directory unavailable. Depth export disabled.";
+  } else {
+    LOG(INFO) << "[DepthPC] enabled on camIdx=" << depthCameraIdx_
+              << " range=[" << depthMinRange_ << "," << depthMaxRange_
+              << "] stride=" << depthPixelStride_;
+  }
+}
+
+void okvis::TrajectoryOutput::setJsonFile(const std::string & filename) {
+  jsonFile_.open(filename.c_str(), std::ios_base::out);
+  OKVIS_ASSERT_TRUE(Exception, jsonFile_.good(),
+                    "couldn't create trajectory JSON file at " << filename)
+  jsonFile_ << "{\n  \"cameras\": [\n";
+  jsonDir_ = filename;
+  auto pos = jsonDir_.find_last_of("/\\");
+  if(pos != std::string::npos) {
+    jsonDir_ = jsonDir_.substr(0, pos);
+  } else {
+    jsonDir_ = ".";
+  }
+  imagesDir_ = jsonDir_ + "/images";
+  try {
+    std::filesystem::create_directories(imagesDir_);
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Failed to create images directory at " << imagesDir_ << ": " << e.what();
+  }
+  pointCloudDir_ = jsonDir_ + "/point_cloud";
+  try {
+    std::filesystem::create_directories(pointCloudDir_);
+    pointCloudEnabled_ = true;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Failed to create point_cloud directory at " << pointCloudDir_ << ": " << e.what();
+    pointCloudEnabled_ = false;
+  }
+  pointCloudDepthDir_ = jsonDir_ + "/point_cloud_depth";
+  try {
+    std::filesystem::create_directories(pointCloudDepthDir_);
+    depthPointCloudDirReady_ = true;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Failed to create point_cloud_depth directory at " << pointCloudDepthDir_ << ": " << e.what();
+    depthPointCloudDirReady_ = false;
+  }
+  // pointCloudPlyDir_ = jsonDir_ + "/point_cloud_ply";
+  // try {
+  //   std::filesystem::create_directories(pointCloudPlyDir_);
+  //   pointCloudPlyEnabled_ = true;
+  // } catch (const std::exception& e) {
+  //   LOG(WARNING) << "Failed to create point_cloud_ply directory at " << pointCloudPlyDir_ << ": " << e.what();
+  //   pointCloudPlyEnabled_ = false;
+  // }
+  imageListPath_ = jsonDir_ + "/image_list.txt";
+  imageListFile_.open(imageListPath_, std::ios::out | std::ios::trunc);
+  if(!imageListFile_.good()) {
+    LOG(WARNING) << "Failed to open image_list.txt at " << imageListPath_;
+    imageListEnabled_ = false;
+  } else {
+    imageListEnabled_ = true;
+  }
+  jsonEnabled_ = true;
+  firstJsonEntry_ = true;
+}
+
 void okvis::TrajectoryOutput::processState(
     const State& state, const TrackingState & trackingState,
     std::shared_ptr<const AlignedMap<StateId, State>> updatedStates,
     std::shared_ptr<const MapPointVector> landmarks) {
+  // resolve image name for this timestamp; if not found, try oldest pending to keep counts aligned
+  std::string imageNameResolved;
+  {
+    std::lock_guard<std::mutex> lock(imageMutex_);
+    auto it = imageNameByStamp_.find(toKey(state.timestamp));
+    if(it != imageNameByStamp_.end()) {
+      imageNameResolved = it->second;
+      imageNameByStamp_.erase(it);
+    } else if(!imageNameByStamp_.empty()) {
+      // fallback: take oldest pending image to keep 1:1 count
+      auto itOldest = imageNameByStamp_.begin();
+      imageNameResolved = itOldest->second;
+      imageNameByStamp_.erase(itOldest);
+    }
+  }
+
   writeStateToCsv(csvFile_, state, rpg_);
+
+  cv::Mat depthImageResolved;
+  if(depthPointCloudEnabled_) {
+    std::lock_guard<std::mutex> lock(depthMutex_);
+    const uint64_t key = toKey(state.timestamp);
+    auto itDepth = depthImagesByStamp_.find(key);
+    if(itDepth != depthImagesByStamp_.end()) {
+      depthImageResolved = itDepth->second;
+      depthImagesByStamp_.erase(itDepth);
+    } else if(!depthImagesByStamp_.empty()) {
+      const uint64_t tolerance = 5000000; // 5ms tolerance in nanoseconds
+      auto lower = depthImagesByStamp_.lower_bound(key);
+      auto pick = depthImagesByStamp_.end();
+      if(lower != depthImagesByStamp_.end()) {
+        if(lower->first - key <= tolerance) {
+          pick = lower;
+        }
+      }
+      if(pick == depthImagesByStamp_.end() && lower != depthImagesByStamp_.begin()) {
+        auto prev = std::prev(lower);
+        if(key >= prev->first && key - prev->first <= tolerance) {
+          pick = prev;
+        }
+      }
+      if(pick == depthImagesByStamp_.end()) {
+        pick = depthImagesByStamp_.begin();
+      }
+      depthImageResolved = pick->second;
+      depthImagesByStamp_.erase(pick);
+    }
+  }
+
+  // if image index < 2, skip JSON/PC to align counts
+  int imgIdx = imageIndexFromName(imageNameResolved);
+  const bool validImageForOutputs = !imageNameResolved.empty() && imgIdx >= 2;
+  if(jsonEnabled_) {
+    if(!validImageForOutputs) {
+      LOG_EVERY_N(WARNING, 200) << "Skip JSON/PC for ts=" << toKey(state.timestamp)
+                                << " (no saved image matched)";
+    } else if(jsonCameraSet_ && jsonIntrinsics_.valid) {
+      writeStateToJson(state, imageNameResolved);
+      jsonFile_.flush(); // keep file consistent for realtime consumers
+    } else {
+      LOG_EVERY_N(WARNING, 200) << "JSON output enabled but camera intrinsics not set.";
+    }
+  }
+
+  // per-frame sparse point cloud saving
+  if((pointCloudEnabled_ /* || pointCloudPlyEnabled_ */) && validImageForOutputs) {
+    if(!writePointCloud(state, landmarks, imageNameResolved)) {
+      LOG_EVERY_N(WARNING, 200) << "Failed to write point cloud for frame " << state.id.value();
+    }
+  }
+
+  if(depthPointCloudEnabled_ && validImageForOutputs && !depthImageResolved.empty()) {
+    if(!writeDepthPointCloud(state, depthImageResolved, imageNameResolved)) {
+      LOG_EVERY_N(WARNING, 200) << "Failed to write depth-based point cloud for frame "
+                                << state.id.value();
+    }
+  } else if(depthPointCloudEnabled_ && validImageForOutputs && depthImageResolved.empty()) {
+    LOG_EVERY_N(INFO, 100) << "[DepthPC] No depth match for ts=" << toKey(state.timestamp)
+                           << " buffer_size=" << depthImagesByStamp_.size();
+  }
 
   if(draw_ && !updatedStates->empty()) {
     std::shared_ptr<GraphStates> statePtr(
@@ -73,15 +292,68 @@ bool okvis::TrajectoryOutput::addImuMeasurement(
 }
 
 bool okvis::TrajectoryOutput::processRGBImage(const okvis::Time& timestamp, const cv::Mat& image) {
-  if (!rgbCsvFile_) {
-    LOG(WARNING) << "Cannot write RGB trajectory, since no CSV file is set";
+  // Save image to disk for COLMAP-style export
+  if(!imagesDir_.empty() && !image.empty()) {
+    const std::string imageName = nextImageName();
+    const std::string fullPath = imagesDir_ + "/" + imageName;
+    try {
+      cv::imwrite(fullPath, image);
+      std::lock_guard<std::mutex> lock(imageMutex_);
+      imageNameByStamp_[toKey(timestamp)] = imageName;
+      // LOG(INFO) << "Saved image " << fullPath << " ts=" << toKey(timestamp);
+      // append to image_list if index >=2
+      int idx = imageIndexFromName(imageName);
+      if(imageListEnabled_ && idx >= 2) {
+        imageListFile_ << imageName << " " << idx << "\n";
+        imageListFile_.flush();
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Failed to write image " << fullPath << ": " << e.what();
+    }
+  }
+
+  // Optional: if an RGB CSV is set, also log pose at RGB timestamps
+  if (rgbCsvFile_) {
+    rgbTrajectory_.enqueue(image, timestamp);
+    auto state_pairs = rgbTrajectory_.getStates(trajectory_);
+    for (auto state_pair : state_pairs) {
+      writeStateToCsv(rgbCsvFile_, state_pair.second, rpg_);
+    }
+  }
+  return true;
+}
+
+bool okvis::TrajectoryOutput::processDepthImage(const okvis::Time& timestamp,
+                                                size_t camIdx,
+                                                const cv::Mat& depthImage) {
+  if(!depthPointCloudEnabled_) {
     return false;
   }
-  rgbTrajectory_.enqueue(image, timestamp);
-  auto state_pairs = rgbTrajectory_.getStates(trajectory_);
-  for (auto state_pair : state_pairs) {
-    writeStateToCsv(rgbCsvFile_, state_pair.second, rpg_);
+  if(camIdx != depthCameraIdx_) {
+    return false;
   }
+  if(depthImage.empty()) {
+    return false;
+  }
+
+  cv::Mat depthFloat;
+  if(depthImage.type() == CV_32F) {
+    depthFloat = depthImage.clone();
+  } else {
+    depthImage.convertTo(depthFloat, CV_32F);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(depthMutex_);
+    depthImagesByStamp_[toKey(timestamp)] = depthFloat;
+    while(depthImagesByStamp_.size() > depthImageBufferSize_) {
+      depthImagesByStamp_.erase(depthImagesByStamp_.begin());
+    }
+  }
+  LOG(INFO) << "[DepthPC] buffered depth ts=" << toKey(timestamp)
+            << " camIdx=" << camIdx
+            << " rows=" << depthFloat.rows
+            << " cols=" << depthFloat.cols;
   return true;
 }
 
@@ -391,5 +663,251 @@ bool okvis::TrajectoryOutput::writeStateToCsv(
             << state.b_g[0] << ", " << state.b_g[1] << ", " << state.b_g[2] << ", "
             << state.b_a[0] << ", " << state.b_a[1] << ", " << state.b_a[2] << ", " << std::endl;
   }
+  return true;
+}
+
+std::string okvis::TrajectoryOutput::makeJsonImageName() {
+  std::stringstream ss;
+  ss << jsonImagePrefix_ << std::setw(jsonImageZeroPad_) << std::setfill('0')
+     << jsonFrameCounter_ << "." << jsonImageExt_;
+  return ss.str();
+}
+
+std::string okvis::TrajectoryOutput::nextImageName() {
+  std::lock_guard<std::mutex> lock(imageMutex_);
+  std::string name = makeJsonImageName();
+  ++jsonFrameCounter_;
+  return name;
+}
+
+uint64_t okvis::TrajectoryOutput::toKey(const okvis::Time& t) const {
+  return static_cast<uint64_t>(t.sec) * 1000000000ull + static_cast<uint64_t>(t.nsec);
+}
+
+int okvis::TrajectoryOutput::imageIndexFromName(const std::string& name) const {
+  if(name.size() <= jsonImagePrefix_.size() + jsonImageExt_.size()+1) return -1;
+  try {
+    auto numStr = name.substr(jsonImagePrefix_.size(),
+                              name.size() - jsonImagePrefix_.size() - 1 - jsonImageExt_.size());
+    return std::stoi(numStr);
+  } catch (...) {
+    return -1;
+  }
+}
+
+void okvis::TrajectoryOutput::appendImageList(const std::string& name, int idx) {
+  if(imageListEnabled_ && idx >= 2) {
+    imageListFile_ << name << " " << idx << "\n";
+    imageListFile_.flush();
+  }
+}
+
+bool okvis::TrajectoryOutput::writeStateToJson(const okvis::State& state,
+  const std::string& imageName) {
+  if (!jsonFile_.good()) {
+    return false;
+  }
+
+  // world->sensor (T_WS) composed with sensor->camera (jsonT_SC_) gives world->camera.
+  // COLMAP 스타일 camera->world 행렬이 필요하므로 전체를 역변환해 camera->world를 기록한다.
+  okvis::kinematics::Transformation T_WC = state.T_WS * jsonT_SC_;
+  okvis::kinematics::Transformation T_CW = T_WC.inverse();
+  Eigen::Matrix4d T = T_CW.T();
+
+  if(!firstJsonEntry_) {
+    jsonFile_ << ",\n";
+  }
+  firstJsonEntry_ = false;
+
+  jsonFile_ << "    {\n"
+            << "      \"T_camera_world\": [\n";
+  for(int r = 0; r < 4; ++r) {
+    jsonFile_ << "        [";
+    for(int c = 0; c < 4; ++c) {
+      jsonFile_ << std::setprecision(18) << T(r,c);
+      if(c < 3) jsonFile_ << ",\n          ";
+    }
+    jsonFile_ << "]";
+    if(r < 3) jsonFile_ << ",\n";
+    else jsonFile_ << "\n";
+  }
+
+  jsonFile_ << "      ],\n"
+            << "      \"image\": \"" << imageName << "\",\n"
+            << "      \"intrinsic\": {\n"
+            << "        \"fx\": " << jsonIntrinsics_.fx << ",\n"
+            << "        \"fy\": " << jsonIntrinsics_.fy << ",\n"
+            << "        \"cx\": " << jsonIntrinsics_.cx << ",\n"
+            << "        \"cy\": " << jsonIntrinsics_.cy << "\n"
+            << "      },\n"
+            << "      \"width\": " << jsonIntrinsics_.width << ",\n"
+            << "      \"height\": " << jsonIntrinsics_.height << ",\n"
+            << "      \"focal\": " << jsonIntrinsics_.focal << "\n"
+            << "    }";
+
+  // LOG(INFO) << "Appended trajectory JSON entry frame=" << state.id.value()
+  //           << " ts=" << toKey(state.timestamp) << " image=" << imageName;
+
+  return true;
+}
+
+bool okvis::TrajectoryOutput::writePointCloud(
+    const okvis::State& state,
+    std::shared_ptr<const okvis::MapPointVector> landmarks,
+    const std::string& imageName) {
+  (void) imageName;
+  if(!pointCloudEnabled_ || !landmarks || imageName.empty()) {
+    return false;
+  }
+  if(!jsonCameraSet_) {
+    return false;
+  }
+
+  const bool writeTxt = pointCloudEnabled_ && !pointCloudDir_.empty();
+  if(!writeTxt /* && !writePly */) {
+    return false;
+  }
+
+  std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> pointsWorld;
+  pointsWorld.reserve(landmarks->size());
+  for(const auto& lm : *landmarks) {
+    // save only landmarks that are associated with the current state
+    if(lm.stateId != state.id.value()) {
+      continue;
+    }
+    Eigen::Vector3d p_W = lm.point.head<3>();
+    pointsWorld.emplace_back(p_W);
+  }
+
+  const size_t count = pointsWorld.size();
+  bool wroteAny = false;
+
+  if(writeTxt) {
+    std::stringstream ssTxt;
+    ssTxt << pointCloudDir_ << "/point_cloud_" << state.id.value() << ".txt";
+    std::ofstream ofsTxt(ssTxt.str());
+    if(ofsTxt.good()) {
+      for(const auto& pt : pointsWorld) {
+        ofsTxt << pt[0] << " " << pt[1] << " " << pt[2] << "\n";
+      }
+      ofsTxt.close();
+      wroteAny = true;
+    } else {
+    LOG(WARNING) << "Failed to open depth TXT point cloud at " << ssTxt.str();
+    }
+  }
+
+  /* PLY export temporarily disabled.
+  const bool writePly = pointCloudPlyEnabled_ && !pointCloudPlyDir_.empty();
+  if(writePly) {
+    std::stringstream ssPly;
+    ssPly << pointCloudPlyDir_ << "/" << imageStem << ".ply";
+    std::ofstream ofsPly(ssPly.str());
+    if(ofsPly.good()) {
+      ofsPly << "ply\nformat ascii 1.0\n";
+      ofsPly << "element vertex " << count << "\n";
+      ofsPly << "property float x\nproperty float y\nproperty float z\n";
+      ofsPly << "end_header\n";
+      for(const auto& pt : pointsCam) {
+        ofsPly << pt[0] << " " << pt[1] << " " << pt[2] << "\n";
+      }
+      ofsPly.close();
+      wroteAny = true;
+    } else {
+      LOG(WARNING) << "Failed to open PLY point cloud at " << ssPly.str();
+    }
+  }
+  */
+
+  // if(wroteAny) {
+  //   LOG(INFO) << "Saved sparse point cloud for frame " << state.id.value()
+  //             << " with " << count << " points (world frame).";
+  // }
+  return wroteAny;
+}
+
+bool okvis::TrajectoryOutput::writeDepthPointCloud(
+    const okvis::State& state,
+    const cv::Mat& depthImage,
+    const std::string& imageName) {
+  (void) imageName;
+  if(pointCloudDepthDir_.empty()) {
+    LOG_EVERY_N(WARNING, 50) << "[DepthPC] point_cloud_depth directory invalid.";
+    return false;
+  }
+  if(imageName.empty()) {
+    LOG_EVERY_N(WARNING, 50) << "[DepthPC] image name empty for frame " << state.id.value();
+    return false;
+  }
+  if(!jsonIntrinsics_.valid) {
+    LOG_EVERY_N(WARNING, 50) << "[DepthPC] JSON intrinsics invalid. Cannot project depth.";
+    return false;
+  }
+
+  if(depthImage.empty()) {
+    LOG_EVERY_N(WARNING, 50) << "[DepthPC] depth image empty for frame " << state.id.value();
+    return false;
+  }
+
+  cv::Mat depthFloat;
+  if(depthImage.type() == CV_32F) {
+    depthFloat = depthImage.clone();
+  } else {
+    depthImage.convertTo(depthFloat, CV_32F);
+  }
+
+  std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> pointsCam;
+  pointsCam.reserve(static_cast<size_t>(depthFloat.rows) * static_cast<size_t>(depthFloat.cols) / (depthPixelStride_ > 0 ? depthPixelStride_ : 1));
+
+  const double fx = jsonIntrinsics_.fx;
+  const double fy = jsonIntrinsics_.fy;
+  const double cx = jsonIntrinsics_.cx;
+  const double cy = jsonIntrinsics_.cy;
+  okvis::kinematics::Transformation T_WC = state.T_WS * jsonT_SC_;
+  Eigen::Matrix4d T = T_WC.T();
+
+  const int stride = std::max(1, depthPixelStride_);
+  for(int v = 0; v < depthFloat.rows; v += stride) {
+    const float* rowPtr = depthFloat.ptr<float>(v);
+    for(int u = 0; u < depthFloat.cols; u += stride) {
+      const float rawDepth = rowPtr[u];
+      if(!std::isfinite(rawDepth) || rawDepth <= 0.0f) {
+        continue;
+      }
+      const double depthMeters = static_cast<double>(rawDepth) * depthScaleMetersPerUnit_;
+      if(depthMeters < depthMinRange_ || depthMeters > depthMaxRange_) {
+        continue;
+      }
+      const double z = depthMeters;
+      const double x = (static_cast<double>(u) - cx) / fx * z;
+      const double y = (static_cast<double>(v) - cy) / fy * z;
+      pointsCam.emplace_back(x, y, z);
+    }
+  }
+
+  if(pointsCam.empty()) {
+    LOG_EVERY_N(INFO, 100) << "[DepthPC] filtered depth produced zero points for frame "
+                           << state.id.value();
+    return false;
+  }
+
+  std::stringstream ssTxt;
+  ssTxt << pointCloudDepthDir_ << "/point_cloud_" << state.id.value() << ".txt";
+  std::ofstream ofsTxt(ssTxt.str());
+  if(!ofsTxt.good()) {
+    LOG(WARNING) << "Failed to open depth TXT point cloud at " << ssTxt.str();
+    return false;
+  }
+
+  for(const auto& pt : pointsCam) {
+    Eigen::Vector4d p_C;
+    p_C << pt[0], pt[1], pt[2], 1.0;
+    Eigen::Vector4d p_W = T * p_C;
+    ofsTxt << p_W[0] << " " << p_W[1] << " " << p_W[2] << "\n";
+  }
+  ofsTxt.close();
+
+  LOG(INFO) << "Saved depth-based sparse point cloud for frame " << state.id.value()
+            << " with " << pointsCam.size() << " points.";
   return true;
 }

@@ -1,0 +1,76 @@
+%YAML:1.0
+cameras:
+  - T_SC: [0.0, 0.0, 1.0, 0.15,
+           -1.0, 0.0, 0.0, 0.0,
+           0.0, -1.0, 0.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+    image_dimension: [1280, 720]
+    distortion_coefficients: [0.0435212, -0.0565677, 0.0, 0.0]
+    distortion_type: radialtangential
+    focal_length: [908.733, 914.716]
+    principal_point: [634.2, 379.686]
+    cam_model: pinhole
+    camera_type: rgb+depth
+    mapping: true
+    mapping_rectification: false
+    slam_use: okvis
+camera_parameters:
+  timestamp_tolerance: 0.005
+  sync_cameras: [0]
+  image_delay: 0.0
+  online_calibration: {do_extrinsics: false, do_extrinsics_final_ba: false, sigma_r: 0.01, sigma_alpha: 0.1, sigma_r_final_ba: 0.03, sigma_alpha_final_ba: 0.3}
+  deep_stereo_indices: [0]
+  fov_scale: 1.0
+imu_parameters:
+  use: true
+  a_max: 160.0
+  g_max: 10.0
+  sigma_g_c: 0.0002
+  sigma_a_c: 0.02
+  sigma_bg: 0.03
+  sigma_ba: 0.01
+  sigma_gw_c: 0.0004
+  sigma_aw_c: 0.02
+  g: 9.81007
+  g0: [0.0, 0.0, 0.0]
+  a0: [0.0, 0.0, 0.0]
+  s_a: [1.0, 1.0, 1.0]
+  T_BS: [ 1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0 ]
+# frontend: detection etc.
+frontend_parameters:
+    detection_threshold: 42.0 #42.0 # detection threshold. By default the uniformity radius in pixels
+    absolute_threshold: 50.0 # absolute Harris corner threshold (noise floor)
+    matching_threshold: 60.0 # BRISK descriptor matching threshold
+    octaves: 0 # number of octaves for detection. 0 means single-scale at highest resolution
+    max_num_keypoints: 2500 # restrict to a maximum of this many keypoints per image (strongest ones)
+    keyframe_overlap: 0.55 # minimum field-of-view overlap
+    use_cnn: false # use the CNN (if available) to filter out dynamic content / sky
+    parallelise_detection: true # Run parallel detect & describe.
+    num_matching_threads: 8 # Parallelise matching with this number of threads.
+
+# estimator parameters
+estimator_parameters:
+    num_keyframes: 5 # number of keyframes in optimisation window
+    num_loop_closure_frames: 3 # number of loop closure frames in optimisation window
+    num_imu_frames: 3 # number of frames linked by most recent nonlinear IMU error terms
+    do_loop_closures: false # whether to do VI-SLAM or VIO
+    do_final_ba: false # Whether to run a full final BA
+    enforce_realtime: false # whether to limit the time budget for optimisation
+    realtime_min_iterations: 3 # minimum number of iterations always performed
+    realtime_max_iterations: 10 # never do more than these, even if not converged
+    realtime_time_limit: 0.035 # time budget for realtime optimisation [s]
+    realtime_num_threads: 3 # number of threads for the realtime optimisation
+    full_graph_iterations: 15 # don't do more than these for the full (background) optimisation
+    full_graph_num_threads: 3 # number of threads for the full (background) optimisation
+    p_dbow: 0.4 # Match threshold for dBoW -- unfortunately this varies with setups.
+    drift_percentage_heuristic: 1.35 # % allowed drift in loop closures rel. to dist. travelled.
+
+# some options for how and what to output
+output_parameters:
+    display_topview: true # Displays top view of the trajectory. Might become slow for long sequences.
+    display_matches: true  # displays debug video and matches. May be slow.
+    display_overhead: false # debug overhead image. Is slow.
+    enable_submapping: true # Enable volumetric submapping

@@ -116,7 +116,17 @@ int main(int argc, char **argv)
   }
 
   const bool isWriteRpg = false;
+  size_t exportCamIdx = 0;
+  for(size_t camIdx = 0; camIdx < parameters.nCameraSystem.numCameras(); ++camIdx) {
+    if(parameters.nCameraSystem.isCameraConfigured(camIdx) &&
+       parameters.nCameraSystem.cameraType(camIdx).depthType.isDepthCamera) {
+      exportCamIdx = camIdx;
+      break;
+    }
+  }
   okvis::TrajectoryOutput writer(savePath+"/okvis2-" + mode + "_trajectory.csv", isWriteRpg, parameters.output.display_topview);
+  writer.setJsonFile(savePath+"/okvis2-" + mode + "_trajectory.json");
+  writer.setJsonCamera(parameters.nCameraSystem, exportCamIdx, "frame", "png", 6);
   estimator.setOptimisedGraphCallback(
         std::bind(&okvis::TrajectoryOutput::processState, &writer,
                   std::placeholders::_1, std::placeholders::_2, std::placeholders::_3,
@@ -129,8 +139,40 @@ int main(int argc, char **argv)
         std::bind(&okvis::ThreadedSlam::addImuMeasurement, &estimator,
                   std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
   datasetReader->setImagesCallback(
-        std::bind(&okvis::ThreadedSlam::addImages, &estimator, std::placeholders::_1,
-                  std::placeholders::_2, std::placeholders::_3));
+        [&writer,&estimator,&datasetReader,exportCamIdx](const okvis::Time& ts,
+                             const std::map<size_t, cv::Mat>& images,
+                             const std::map<size_t, cv::Mat>& depthImages){
+          // feed estimator with maps (expected signature)
+          estimator.addImages(ts, images, depthImages);
+          // save a color image if available (prefer 3-channel), else first non-empty
+          if(!images.empty()) {
+            // Try to reload original color image by filename to avoid grayscale feed
+            std::string fname;
+            cv::Mat colorImg;
+            for (const auto& kv : images) {
+              if(datasetReader->getLastImageFilename(kv.first, fname)) {
+                colorImg = cv::imread(fname, cv::IMREAD_COLOR);
+              }
+              if(!colorImg.empty()) break;
+            }
+            const cv::Mat* chosen = nullptr;
+            if(!colorImg.empty()) {
+              chosen = &colorImg;
+            } else {
+              // fallback to in-memory image if no filename found
+              for (const auto& kv : images) {
+                if(!kv.second.empty()) {
+                  chosen = &kv.second;
+                  break;
+                }
+              }
+            }
+            if(chosen && !chosen->empty()) {
+              writer.processRGBImage(ts, *chosen);
+            }
+          }
+          return true;
+        });
   if(parameters.gps) {
     if ((*parameters.gps).type == "cartesian") {
       datasetReader->setGpsCallback(

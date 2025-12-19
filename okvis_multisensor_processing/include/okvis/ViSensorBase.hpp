@@ -136,6 +136,9 @@ public:
   /// @return Fraction read already.
   virtual double completion() const = 0;
 
+  /// @brief Get last filename for a camera (optional; default false).
+  virtual bool getLastImageFilename(size_t /*camIdx*/, std::string& /*filename*/) const { return false; }
+
 };
 
 } // okvis

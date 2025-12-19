@@ -79,6 +79,16 @@ double DatasetReader::completion() const {
   return 0.0;
 }
 
+bool DatasetReader::getLastImageFilename(size_t camIdx, std::string& filename) const {
+  std::lock_guard<std::mutex> lock(lastImageMutex_);
+  auto it = lastImageFilenames_.find(camIdx);
+  if(it == lastImageFilenames_.end()) {
+    return false;
+  }
+  filename = it->second;
+  return true;
+}
+
 bool DatasetReader::startStreaming() {
   OKVIS_ASSERT_TRUE(Exception, !imagesCallbacks_.empty(), "no add image callback registered")
   OKVIS_ASSERT_TRUE(Exception, !imuCallbacks_.empty(), "no add IMU callback registered")
@@ -357,6 +367,10 @@ void  DatasetReader::processing() {
       }
       for(size_t i : syncCameras_) {
         const std::string & filename = iterators.cam_iterators.at(i)->second;
+        {
+          std::lock_guard<std::mutex> lock(lastImageMutex_);
+          lastImageFilenames_[i] = filename;
+        }
         cv::Mat filtered;
         boost::filesystem::path p(filename);
         std::string directory = p.parent_path().parent_path().filename().string();
@@ -373,11 +387,15 @@ void  DatasetReader::processing() {
       }
     } else {
       const std::string & filename = iterators.cam_iterators.at(i_min)->second;
+      {
+        std::lock_guard<std::mutex> lock(lastImageMutex_);
+        lastImageFilenames_[i_min] = filename;
+      }
       cv::Mat filtered;
       boost::filesystem::path p(filename);
       std::string directory = p.parent_path().parent_path().filename().string();
       if(directory.size() > 3 && directory.substr(0,3).compare("cam") == 0) {
-        filtered = cv::imread(filename, cv::IMREAD_GRAYSCALE); // force gray already here
+        filtered = cv::imread(filename, cv::IMREAD_GRAYSCALE); // original behavior
       } else {
         filtered = cv::imread(filename); // colour
       }
@@ -412,9 +430,13 @@ void  DatasetReader::processing() {
       // next also read synced image, if not already added from sync group above.
       if(!syncCameras_.count(i_min)) {
         const std::string & filename = iterators.cam_iterators.at(i_min)->second;
+        {
+          std::lock_guard<std::mutex> lock(lastImageMutex_);
+          lastImageFilenames_[i_min] = filename;
+        }
         cv::Mat filtered;
         if(filename.substr(filename.size()-3,filename.size()).compare("png") == 0) {
-          filtered = cv::imread(filename, cv::IMREAD_GRAYSCALE); // force gray already here
+          filtered = cv::imread(filename, cv::IMREAD_GRAYSCALE); // original behavior
         } else {
           filtered = cv::imread(filename); // colour
         }

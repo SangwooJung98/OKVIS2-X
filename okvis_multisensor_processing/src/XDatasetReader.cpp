@@ -86,6 +86,16 @@ double XDatasetReader::completion() const {
   return 0.0;
 }
 
+bool XDatasetReader::getLastImageFilename(size_t camIdx, std::string& filename) const {
+    std::lock_guard<std::mutex> lock(lastImageMutex_);
+    auto it = lastImageFilenames_.find(camIdx);
+    if(it == lastImageFilenames_.end()) {
+        return false;
+    }
+    filename = it->second;
+    return true;
+}
+
 bool XDatasetReader::startStreaming() {
   OKVIS_ASSERT_TRUE(Exception, !imagesCallbacks_.empty(), "no add image callback registered")
   if(imuFlag_)
@@ -323,6 +333,10 @@ void  XDatasetReader::processing() {
       } else {
         filename = path_ + "/cam" + std::to_string(i) + "/data/" + cam_iterators.at(i)->second;
         filtered = cv::imread(filename, cv::IMREAD_GRAYSCALE);
+      }
+      {
+        std::lock_guard<std::mutex> lock(lastImageMutex_);
+        lastImageFilenames_[i] = filename;
       }
 
       OKVIS_ASSERT_TRUE(
