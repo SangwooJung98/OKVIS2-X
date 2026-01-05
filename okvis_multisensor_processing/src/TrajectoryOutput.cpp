@@ -16,6 +16,7 @@
  * @author Stefan Leutenegger
  */
 
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 #include <cmath>
@@ -28,6 +29,31 @@
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include <okvis/TrajectoryOutput.hpp>
+#include <okvis/RealtimePublisher.hpp>
+
+namespace {
+
+cv::Mat makeStreamReady(const cv::Mat& image) {
+  if (image.empty()) {
+    return cv::Mat();
+  }
+  if (image.type() == CV_8UC3) {
+    return image.clone();
+  }
+  cv::Mat converted;
+  if (image.channels() == 1) {
+    cv::cvtColor(image, converted, cv::COLOR_GRAY2BGR);
+    return converted;
+  }
+  if (image.channels() == 4) {
+    cv::cvtColor(image, converted, cv::COLOR_BGRA2BGR);
+    return converted;
+  }
+  image.convertTo(converted, CV_8UC3, 255.0);
+  return converted;
+}
+
+}  // namespace
 
 
 okvis::TrajectoryOutput::TrajectoryOutput(bool draw) : draw_(draw) {
@@ -106,6 +132,7 @@ bool okvis::TrajectoryOutput::setJsonCamera(const okvis::cameras::NCameraSystem&
   jsonImageExt_ = imageExt;
   jsonImageZeroPad_ = zeroPad;
   jsonFrameCounter_ = 0;
+  tryAttachRealtimePublisher();
   return true;
 }
 
@@ -133,9 +160,11 @@ void okvis::TrajectoryOutput::setDepthExportConfig(double minRangeMeters,
               << " range=[" << depthMinRange_ << "," << depthMaxRange_
               << "] stride=" << depthPixelStride_;
   }
+  tryAttachRealtimePublisher();
 }
 
 void okvis::TrajectoryOutput::setJsonFile(const std::string & filename) {
+  configureRealtimePublisherFromEnv();
   jsonFile_.open(filename.c_str(), std::ios_base::out);
   OKVIS_ASSERT_TRUE(Exception, jsonFile_.good(),
                     "couldn't create trajectory JSON file at " << filename)
@@ -242,12 +271,13 @@ void okvis::TrajectoryOutput::processState(
     }
   }
 
+  const uint64_t timestampKey = toKey(state.timestamp);
   // if image index < 2, skip JSON/PC to align counts
   int imgIdx = imageIndexFromName(imageNameResolved);
   const bool validImageForOutputs = !imageNameResolved.empty() && imgIdx >= 2;
   if(jsonEnabled_) {
     if(!validImageForOutputs) {
-      LOG_EVERY_N(WARNING, 200) << "Skip JSON/PC for ts=" << toKey(state.timestamp)
+      LOG_EVERY_N(WARNING, 200) << "Skip JSON/PC for ts=" << timestampKey
                                 << " (no saved image matched)";
     } else if(jsonCameraSet_ && jsonIntrinsics_.valid) {
       writeStateToJson(state, imageNameResolved);
@@ -257,10 +287,31 @@ void okvis::TrajectoryOutput::processState(
     }
   }
 
+  const bool wantsRealtimeStream =
+      realtimePublisher_ && realtimePublisher_->isReady();
+  std::vector<Eigen::Vector3d,
+              Eigen::aligned_allocator<Eigen::Vector3d>>
+      sparsePoints;
+  if ((pointCloudEnabled_ || wantsRealtimeStream) && validImageForOutputs) {
+    collectLandmarkPoints(state, landmarks, sparsePoints);
+  }
+
   // per-frame sparse point cloud saving
-  if((pointCloudEnabled_ /* || pointCloudPlyEnabled_ */) && validImageForOutputs) {
-    if(!writePointCloud(state, landmarks, imageNameResolved)) {
+  if(pointCloudEnabled_ && validImageForOutputs) {
+    if(!writePointCloud(state, sparsePoints, imageNameResolved)) {
       LOG_EVERY_N(WARNING, 200) << "Failed to write point cloud for frame " << state.id.value();
+    }
+  }
+
+  if (wantsRealtimeStream && validImageForOutputs) {
+    cv::Mat streamImage;
+    if(popStreamImage(timestampKey, streamImage) && !streamImage.empty()) {
+      submitRealtimeFrame(state, imgIdx, imageNameResolved, streamImage,
+                          sparsePoints);
+    } else {
+      LOG_EVERY_N(WARNING, 200)
+          << "[RealtimePublisher] Missing RGB buffer for timestamp "
+          << timestampKey;
     }
   }
 
@@ -306,6 +357,13 @@ bool okvis::TrajectoryOutput::processRGBImage(const okvis::Time& timestamp, cons
       if(imageListEnabled_ && idx >= 2) {
         imageListFile_ << imageName << " " << idx << "\n";
         imageListFile_.flush();
+      }
+      if(realtimePublisher_) {
+        const uint64_t key = toKey(timestamp);
+        cv::Mat streamImage = makeStreamReady(image);
+        if(!streamImage.empty()) {
+          pushStreamImage(key, streamImage);
+        }
       }
     } catch (const std::exception& e) {
       LOG(WARNING) << "Failed to write image " << fullPath << ": " << e.what();
@@ -751,12 +809,32 @@ bool okvis::TrajectoryOutput::writeStateToJson(const okvis::State& state,
   return true;
 }
 
-bool okvis::TrajectoryOutput::writePointCloud(
+void okvis::TrajectoryOutput::collectLandmarkPoints(
     const okvis::State& state,
     std::shared_ptr<const okvis::MapPointVector> landmarks,
+    std::vector<Eigen::Vector3d,
+                Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) const {
+  pointsWorld.clear();
+  if(!landmarks) {
+    return;
+  }
+  pointsWorld.reserve(landmarks->size());
+  for(const auto& lm : *landmarks) {
+    if(lm.stateId != state.id.value()) {
+      continue;
+    }
+    Eigen::Vector3d p_W = lm.point.head<3>();
+    pointsWorld.emplace_back(p_W);
+  }
+}
+
+bool okvis::TrajectoryOutput::writePointCloud(
+    const okvis::State& state,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
     const std::string& imageName) {
   (void) imageName;
-  if(!pointCloudEnabled_ || !landmarks || imageName.empty()) {
+  if(!pointCloudEnabled_ || imageName.empty()) {
     return false;
   }
   if(!jsonCameraSet_) {
@@ -768,20 +846,7 @@ bool okvis::TrajectoryOutput::writePointCloud(
     return false;
   }
 
-  std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> pointsWorld;
-  pointsWorld.reserve(landmarks->size());
-  for(const auto& lm : *landmarks) {
-    // save only landmarks that are associated with the current state
-    if(lm.stateId != state.id.value()) {
-      continue;
-    }
-    Eigen::Vector3d p_W = lm.point.head<3>();
-    pointsWorld.emplace_back(p_W);
-  }
-
-  const size_t count = pointsWorld.size();
   bool wroteAny = false;
-
   if(writeTxt) {
     std::stringstream ssTxt;
     ssTxt << pointCloudDir_ << "/point_cloud_" << state.id.value() << ".txt";
@@ -793,36 +858,9 @@ bool okvis::TrajectoryOutput::writePointCloud(
       ofsTxt.close();
       wroteAny = true;
     } else {
-    LOG(WARNING) << "Failed to open depth TXT point cloud at " << ssTxt.str();
+      LOG(WARNING) << "Failed to open sparse TXT point cloud at " << ssTxt.str();
     }
   }
-
-  /* PLY export temporarily disabled.
-  const bool writePly = pointCloudPlyEnabled_ && !pointCloudPlyDir_.empty();
-  if(writePly) {
-    std::stringstream ssPly;
-    ssPly << pointCloudPlyDir_ << "/" << imageStem << ".ply";
-    std::ofstream ofsPly(ssPly.str());
-    if(ofsPly.good()) {
-      ofsPly << "ply\nformat ascii 1.0\n";
-      ofsPly << "element vertex " << count << "\n";
-      ofsPly << "property float x\nproperty float y\nproperty float z\n";
-      ofsPly << "end_header\n";
-      for(const auto& pt : pointsCam) {
-        ofsPly << pt[0] << " " << pt[1] << " " << pt[2] << "\n";
-      }
-      ofsPly.close();
-      wroteAny = true;
-    } else {
-      LOG(WARNING) << "Failed to open PLY point cloud at " << ssPly.str();
-    }
-  }
-  */
-
-  // if(wroteAny) {
-  //   LOG(INFO) << "Saved sparse point cloud for frame " << state.id.value()
-  //             << " with " << count << " points (world frame).";
-  // }
   return wroteAny;
 }
 
@@ -910,4 +948,118 @@ bool okvis::TrajectoryOutput::writeDepthPointCloud(
   LOG(INFO) << "Saved depth-based sparse point cloud for frame " << state.id.value()
             << " with " << pointsCam.size() << " points.";
   return true;
+}
+
+void okvis::TrajectoryOutput::configureRealtimePublisherFromEnv() {
+  if(realtimeEnvChecked_) {
+    LOG(INFO) << "[RealtimePublisher] Env already checked: host=" << realtimeHost_
+              << " port=" << realtimePort_;
+    return;
+  }
+  realtimeEnvChecked_ = true;
+  const char* hostEnv = std::getenv("OKVIS_STREAM_HOST");
+  const char* portEnv = std::getenv("OKVIS_STREAM_PORT");
+  if(!hostEnv || !portEnv) {
+    return;
+  }
+  int port = std::atoi(portEnv);
+  if(port <= 0 || port >= 65535) {
+    LOG(WARNING) << "[RealtimePublisher] Invalid port specified via "
+                 << "OKVIS_STREAM_PORT=" << portEnv;
+    return;
+  }
+  realtimeHost_ = hostEnv;
+  realtimePort_ = static_cast<uint16_t>(port);
+  realtimeStreamingConfigured_ = true;
+  LOG(INFO) << "[RealtimePublisher] Configured stream target " << realtimeHost_
+            << ":" << realtimePort_;
+}
+
+void okvis::TrajectoryOutput::tryAttachRealtimePublisher() {
+  if(!realtimeStreamingConfigured_) {
+    LOG(INFO) << "[RealtimePublisher] Not configured; skipping attach.";
+    return;
+  }
+  if(!jsonIntrinsics_.valid || !jsonCameraSet_) {
+    LOG(INFO) << "[RealtimePublisher] Intrinsics not ready; skipping attach.";
+    return;
+  }
+  if(!realtimePublisher_) {
+    realtimePublisher_ =
+        std::make_shared<RealtimePublisher>(realtimeHost_, realtimePort_);
+    LOG(INFO) << "[RealtimePublisher] Instance created.";
+  }
+
+  const uint32_t width = static_cast<uint32_t>(
+      std::max(0, jsonIntrinsics_.width));
+  const uint32_t height = static_cast<uint32_t>(
+      std::max(0, jsonIntrinsics_.height));
+
+  realtimePublisher_->setCameraIntrinsics(
+      jsonIntrinsics_.fx, jsonIntrinsics_.fy, jsonIntrinsics_.cx,
+      jsonIntrinsics_.cy, width, height, depthMinRange_, depthMaxRange_,
+      static_cast<uint32_t>(jsonCameraIdx_));
+  LOG(INFO) << "[RealtimePublisher] Intrinsics pushed (w=" << width
+            << ", h=" << height << ", camIdx=" << jsonCameraIdx_ << ")";
+}
+
+void okvis::TrajectoryOutput::pushStreamImage(uint64_t key,
+                                              const cv::Mat& image) {
+  if(image.empty()) {
+    LOG(WARNING) << "[RealtimePublisher] Attempted to push empty stream image.";
+    return;
+  }
+  std::lock_guard<std::mutex> lock(streamImageMutex_);
+  streamImagesByStamp_[key] = image.clone();
+  while(streamImagesByStamp_.size() > streamImageBufferSize_) {
+    streamImagesByStamp_.erase(streamImagesByStamp_.begin());
+  }
+  LOG(INFO) << "[RealtimePublisher] Buffered RGB ts=" << key
+            << " (buffer=" << streamImagesByStamp_.size() << ")";
+}
+
+bool okvis::TrajectoryOutput::popStreamImage(uint64_t key, cv::Mat& image) {
+  std::lock_guard<std::mutex> lock(streamImageMutex_);
+  if(streamImagesByStamp_.empty()) {
+    LOG(WARNING) << "[RealtimePublisher] popStreamImage called with empty buffer.";
+    return false;
+  }
+  auto it = streamImagesByStamp_.find(key);
+  if(it == streamImagesByStamp_.end()) {
+    LOG(WARNING) << "[RealtimePublisher] Exact timestamp not found; using oldest.";
+    it = streamImagesByStamp_.begin();
+  }
+  image = it->second.clone();
+  streamImagesByStamp_.erase(it);
+  return !image.empty();
+}
+
+void okvis::TrajectoryOutput::submitRealtimeFrame(
+    const okvis::State& state,
+    int frameIdx,
+    const std::string& imageName,
+    const cv::Mat& image,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) {
+  if(!realtimePublisher_ || !realtimePublisher_->isReady()) {
+    LOG(WARNING) << "[RealtimePublisher] submitRealtimeFrame skipped (publisher not ready).";
+    return;
+  }
+  if(image.empty() || !jsonCameraSet_) {
+    LOG(WARNING) << "[RealtimePublisher] submitRealtimeFrame missing image or intrinsics.";
+    return;
+  }
+  okvis::kinematics::Transformation T_WC = state.T_WS * jsonT_SC_;
+  okvis::kinematics::Transformation T_CW = T_WC.inverse();
+  Eigen::Matrix4d T = T_CW.T();
+  realtimePublisher_->submitFrame(
+      toKey(state.timestamp),
+      static_cast<uint32_t>(std::max(0, frameIdx)),
+      T,
+      image,
+      pointsWorld,
+      imageName);
+  LOG(INFO) << "[RealtimePublisher] Submitted frame idx=" << frameIdx
+            << " ts=" << toKey(state.timestamp)
+            << " pts=" << pointsWorld.size();
 }

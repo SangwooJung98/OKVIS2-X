@@ -16,6 +16,7 @@ add_library(${LIB_NAME}
   include/okvis/QueuedTrajectory.hpp
   include/okvis/Realsense.hpp
   include/okvis/RealsenseRgbd.hpp
+  include/okvis/RealtimePublisher.hpp
   include/okvis/RpgDatasetReader.hpp
   include/okvis/ThreadedSlam.hpp
   include/okvis/TrajectoryOutput.hpp
@@ -30,6 +31,7 @@ add_library(${LIB_NAME}
   src/RpgDatasetReader.cpp
   src/SubmappingInterface.cpp
   src/ThreadedSlam.cpp
+  src/RealtimePublisher.cpp
   src/TrajectoryOutput.cpp
   src/ViVisualizer.cpp
 )

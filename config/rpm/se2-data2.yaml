@@ -5,7 +5,7 @@
 general:
   # outputs
   results_directory:          "/home/"
-  write_mesh_output: true
+  write_mesh_output: false
 
   # Sensor processing
   sensor_measurement_downsampling: 1
@@ -17,7 +17,7 @@ general:
   submap_overlap_ratio: 0.2
   submap_min_frames: 60
   near_plane: 0.4
-  far_plane: 3.0
+  far_plane: 4.0
 
   # Alignment settings
   use_map_to_map_factors: true

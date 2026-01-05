@@ -104,6 +104,7 @@ int main(int argc, char **argv)
   std::shared_ptr<okvis::ThreadedSlam> estimator(nullptr);
   estimator.reset(new okvis::ThreadedSlam(parameters, dBowVocDir, submapConfig));
   estimator->setBlocking(true);
+  LOG(INFO) << "[App] ThreadedSlam instantiated and set to blocking mode.";
 
   // Setup the submapping interface
   std::shared_ptr<okvis::SubmappingInterface> seInterface(nullptr);
@@ -136,9 +137,18 @@ int main(int argc, char **argv)
 
   // Setup the trajectory output writer
   std::shared_ptr<okvis::TrajectoryOutput> writer;
-  writer.reset(new okvis::TrajectoryOutput(savePath+"/okvis2-" + mode + "_trajectory.csv", false, parameters.output.display_topview));
+  LOG(INFO) << "[App] Creating TrajectoryOutput (path=" << savePath << ")";
+  writer.reset(new okvis::TrajectoryOutput(
+      savePath+"/okvis2-" + mode + "_trajectory.csv",
+      false,
+      parameters.output.display_topview));
+  LOG(INFO) << "[App] TrajectoryOutput CSV ready.";
+  LOG(INFO) << "[App] Setting JSON file...";
   writer->setJsonFile(savePath+"/okvis2-" + mode + "_trajectory.json");
+  LOG(INFO) << "[App] Setting JSON camera...";
   writer->setJsonCamera(parameters.nCameraSystem, exportCamIdx, "frame", "png", 6);
+  LOG(INFO) << "[App] TrajectoryOutput initialised (mode=" << mode
+            << ", exportCamIdx=" << exportCamIdx << ")";
   
   // save depth image (sw)
   // writer->setDepthExportConfig(0.4, 10.0, 0.001, 50);
@@ -268,6 +278,7 @@ int main(int argc, char **argv)
       LOG(ERROR) << "Failure with datasetReader streaming.";
       return EXIT_FAILURE;
   }
+  LOG(INFO) << "[App] DatasetReader streaming started.";
 
   // Estimator Loop
   okvis::Time startTime = okvis::Time::now();

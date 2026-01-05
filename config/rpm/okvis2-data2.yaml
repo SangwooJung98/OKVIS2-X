@@ -4,11 +4,11 @@ cameras:
            -1.0, 0.0, 0.0, 0.0,
            0.0, -1.0, 0.0, 0.0,
            0.0, 0.0, 0.0, 1.0]
-    image_dimension: [1280, 720]
-    distortion_coefficients: [0.0435212, -0.0565677, 0.0, 0.0]
+    image_dimension: [640, 480]
+    distortion_coefficients: [0.176912, -0.318989, 0.0, 0.0]
     distortion_type: radialtangential
-    focal_length: [908.733, 914.716]
-    principal_point: [634.2, 379.686]
+    focal_length: [607.088, 607.514]
+    principal_point: [318.43, 249.622]
     cam_model: pinhole
     camera_type: rgb+depth
     mapping: true
@@ -49,7 +49,7 @@ frontend_parameters:
     keyframe_overlap: 0.55 # minimum field-of-view overlap
     use_cnn: false # use the CNN (if available) to filter out dynamic content / sky
     parallelise_detection: true # Run parallel detect & describe.
-    num_matching_threads: 8 # Parallelise matching with this number of threads.
+    num_matching_threads: 3 # Parallelise matching with this number of threads.
 
 # estimator parameters
 estimator_parameters:
@@ -72,5 +72,5 @@ estimator_parameters:
 output_parameters:
     display_topview: true # Displays top view of the trajectory. Might become slow for long sequences.
     display_matches: true  # displays debug video and matches. May be slow.
-    display_overhead: false # debug overhead image. Is slow.
-    enable_submapping: false # Enable volumetric submapping
+    display_overhead: true # debug overhead image. Is slow.
+    enable_submapping: true # Enable volumetric submapping

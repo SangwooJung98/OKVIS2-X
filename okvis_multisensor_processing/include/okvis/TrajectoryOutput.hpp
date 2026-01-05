@@ -44,6 +44,7 @@
 #include <okvis/kinematics/Transformation.hpp>
 #include <okvis/cameras/NCameraSystem.hpp>
 #include <okvis/cameras/PinholeCamera.hpp>
+#include <okvis/RealtimePublisher.hpp>
 
 
 namespace okvis {
@@ -171,14 +172,32 @@ private:
   bool lookupImageName(const okvis::Time& t, std::string& name);
   int imageIndexFromName(const std::string& name) const;
   void appendImageList(const std::string& name, int idx);
-  bool writePointCloud(const okvis::State& state,
-                       std::shared_ptr<const okvis::MapPointVector> landmarks,
-                       const std::string& imageName);
+  void collectLandmarkPoints(
+      const okvis::State& state,
+      std::shared_ptr<const okvis::MapPointVector> landmarks,
+      std::vector<Eigen::Vector3d,
+                  Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) const;
+  bool writePointCloud(
+      const okvis::State& state,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+      const std::string& imageName);
   bool writeDepthPointCloud(const okvis::State& state,
                             const cv::Mat& depthImage,
                             const std::string& imageName);
   bool writeStateToJson(const okvis::State& state,
                         const std::string& imageName);
+  void configureRealtimePublisherFromEnv();
+  void tryAttachRealtimePublisher();
+  void pushStreamImage(uint64_t key, const cv::Mat& image);
+  bool popStreamImage(uint64_t key, cv::Mat& image);
+  void submitRealtimeFrame(
+      const okvis::State& state,
+      int frameIdx,
+      const std::string& imageName,
+      const cv::Mat& image,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld);
 
   std::fstream csvFile_; ///< The CSV file.
   std::fstream rgbCsvFile_;  ///< The RGB CSV file.
@@ -254,6 +273,16 @@ private:
   size_t depthImageBufferSize_ = 20;
   std::map<uint64_t, cv::Mat> depthImagesByStamp_;
   std::mutex depthMutex_;
+
+  // realtime streaming support
+  bool realtimeEnvChecked_ = false;
+  bool realtimeStreamingConfigured_ = false;
+  std::string realtimeHost_;
+  uint16_t realtimePort_ = 0;
+  size_t streamImageBufferSize_ = 20;
+  std::map<uint64_t, cv::Mat> streamImagesByStamp_;
+  std::mutex streamImageMutex_;
+  std::shared_ptr<RealtimePublisher> realtimePublisher_;
 
   /// \brief Convert metric coordinates to pixels.
   /// \param pointInMeters Point in [m].
