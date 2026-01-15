@@ -1,30 +1,45 @@
 %YAML:1.0
 cameras:
-  - T_SC: [0.0, 0.0, 1.0, 0.15,
+  - T_SC: [0.0, 0.0, 1.0, 0.0,
            -1.0, 0.0, 0.0, 0.0,
            0.0, -1.0, 0.0, 0.0,
            0.0, 0.0, 0.0, 1.0]
-    image_dimension: [640, 480]
-    distortion_coefficients: [0.176912, -0.318989, 0.0, 0.0]
+    image_dimension: [960, 600]
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0]
     distortion_type: radialtangential
-    focal_length: [607.088, 607.514]
-    principal_point: [318.43, 249.622]
+    focal_length: [363.067626953125, 363.067626953125]
+    principal_point: [483.5241394042969, 301.01165771484375]
     cam_model: pinhole
     camera_type: rgb+depth
     mapping: true
-    mapping_rectification: false
+    mapping_rectification: true
     slam_use: okvis
+  - T_SC: [0.0, 0.0, 1.0, 0.0,
+           -1.0, 0.0, 0.0, -0.12,
+           0.0, -1.0, 0.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+    image_dimension: [960, 600]
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0]
+    distortion_type: radialtangential
+    focal_length: [363.067626953125, 363.067626953125]
+    principal_point: [483.5241394042969, 301.01165771484375]
+    cam_model: pinhole
+    camera_type: rgb
+    mapping_rectification: true
+    slam_use: okvis
+
+
 camera_parameters:
   timestamp_tolerance: 0.005
-  sync_cameras: [0]
+  sync_cameras: [0, 1]
   image_delay: 0.0
   online_calibration: {do_extrinsics: false, do_extrinsics_final_ba: false, sigma_r: 0.01, sigma_alpha: 0.1, sigma_r_final_ba: 0.03, sigma_alpha_final_ba: 0.3}
-  deep_stereo_indices: [0]
+  deep_stereo_indices: [0, 1]
   fov_scale: 1.0
 imu_parameters:
   use: true
-  a_max: 160.0
-  g_max: 10.0
+  a_max: 80.0
+  g_max: 17.5
   sigma_g_c: 0.00278
   sigma_a_c: 0.0252
   sigma_bg: 0.03
@@ -56,15 +71,15 @@ estimator_parameters:
     num_keyframes: 5 # number of keyframes in optimisation window
     num_loop_closure_frames: 3 # number of loop closure frames in optimisation window
     num_imu_frames: 3 # number of frames linked by most recent nonlinear IMU error terms
-    do_loop_closures: false # whether to do VI-SLAM or VIO
+    do_loop_closures: true # whether to do VI-SLAM or VIO
     do_final_ba: false # Whether to run a full final BA
     enforce_realtime: false # whether to limit the time budget for optimisation
     realtime_min_iterations: 3 # minimum number of iterations always performed
     realtime_max_iterations: 10 # never do more than these, even if not converged
     realtime_time_limit: 0.035 # time budget for realtime optimisation [s]
-    realtime_num_threads: 3 # number of threads for the realtime optimisation
+    realtime_num_threads: 4 # number of threads for the realtime optimisation
     full_graph_iterations: 15 # don't do more than these for the full (background) optimisation
-    full_graph_num_threads: 3 # number of threads for the full (background) optimisation
+    full_graph_num_threads: 4 # number of threads for the full (background) optimisation
     p_dbow: 0.4 # Match threshold for dBoW -- unfortunately this varies with setups.
     drift_percentage_heuristic: 1.35 # % allowed drift in loop closures rel. to dist. travelled.
 
@@ -72,5 +87,9 @@ estimator_parameters:
 output_parameters:
     display_topview: true # Displays top view of the trajectory. Might become slow for long sequences.
     display_matches: true  # displays debug video and matches. May be slow.
-    display_overhead: true # debug overhead image. Is slow.
-    enable_submapping: true # Enable volumetric submapping
+    display_overhead: false # debug overhead image. Is slow.
+    enable_submapping: false # Enable volumetric submapping
+    
+    # Sangwoo's option (depth export)
+    depth_export_scale: 1.0 # Depth export scale (meters per unit)
+    depth_export_stride: 50 # Depth export pixel stride

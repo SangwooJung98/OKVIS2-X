@@ -1,14 +1,14 @@
 %YAML:1.0
 cameras:
-  - T_SC: [0.0, 0.0, 1.0, 0.15,
+  - T_SC: [0.0, 0.0, 1.0, 0.0,
            -1.0, 0.0, 0.0, 0.0,
            0.0, -1.0, 0.0, 0.0,
            0.0, 0.0, 0.0, 1.0]
-    image_dimension: [640, 480]
-    distortion_coefficients: [0.176912, -0.318989, 0.0, 0.0]
+    image_dimension: [960, 600]
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0]
     distortion_type: radialtangential
-    focal_length: [607.088, 607.514]
-    principal_point: [318.43, 249.622]
+    focal_length: [363.067626953125, 363.067626953125]
+    principal_point: [483.5241394042969, 301.01165771484375]
     cam_model: pinhole
     camera_type: rgb+depth
     mapping: true
@@ -23,7 +23,7 @@ camera_parameters:
   fov_scale: 1.0
 imu_parameters:
   use: true
-  a_max: 160.0
+  a_max: 80.0
   g_max: 10.0
   sigma_g_c: 0.00278
   sigma_a_c: 0.0252

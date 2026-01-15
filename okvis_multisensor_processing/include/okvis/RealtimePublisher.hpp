@@ -18,10 +18,10 @@
 
 namespace okvis {
 
-/**
- * @brief Streams per-frame RGB + pose + sparse point cloud data to an external
- *        consumer over TCP in a simple binary protocol.
- */
+  /**
+   * @brief Streams per-frame RGB + pose + sparse/depth point cloud data to an
+   *        external consumer over TCP in a simple binary protocol.
+   */
 class RealtimePublisher {
  public:
   RealtimePublisher(const std::string& host, uint16_t port);
@@ -44,6 +44,8 @@ class RealtimePublisher {
       const cv::Mat& imageBgr,
       const std::vector<Eigen::Vector3d,
                         Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld,
       const std::string& imageName);
 
  private:
@@ -55,7 +57,7 @@ class RealtimePublisher {
   };
 
   static constexpr uint32_t kMagic = 0x4F334753;  // "O3GS"
-  static constexpr uint16_t kVersion = 1;
+  static constexpr uint16_t kVersion = 2;
   static constexpr uint16_t kTypeHandshake = 1;
   static constexpr uint16_t kTypeFrame = 2;
 
@@ -71,6 +73,8 @@ class RealtimePublisher {
       const cv::Mat& imageBgr,
       const std::vector<Eigen::Vector3d,
                         Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld,
       const std::string& imageName);
   void enqueuePacket(std::vector<uint8_t>&& packet);
 

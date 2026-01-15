@@ -144,31 +144,26 @@ int main(int argc, char **argv)
                              const std::map<size_t, cv::Mat>& depthImages){
           // feed estimator with maps (expected signature)
           estimator.addImages(ts, images, depthImages);
-          // save a color image if available (prefer 3-channel), else first non-empty
+          // save a color image for exportCamIdx only
           if(!images.empty()) {
-            // Try to reload original color image by filename to avoid grayscale feed
-            std::string fname;
-            cv::Mat colorImg;
-            for (const auto& kv : images) {
-              if(datasetReader->getLastImageFilename(kv.first, fname)) {
+            const auto it = images.find(exportCamIdx);
+            if(it != images.end() && !it->second.empty()) {
+              // Try to reload original color image by filename to avoid grayscale feed
+              std::string fname;
+              cv::Mat colorImg;
+              if(datasetReader->getLastImageFilename(exportCamIdx, fname)) {
                 colorImg = cv::imread(fname, cv::IMREAD_COLOR);
               }
-              if(!colorImg.empty()) break;
-            }
-            const cv::Mat* chosen = nullptr;
-            if(!colorImg.empty()) {
-              chosen = &colorImg;
-            } else {
-              // fallback to in-memory image if no filename found
-              for (const auto& kv : images) {
-                if(!kv.second.empty()) {
-                  chosen = &kv.second;
-                  break;
-                }
+              const cv::Mat* chosen = nullptr;
+              if(!colorImg.empty()) {
+                chosen = &colorImg;
+              } else {
+                // fallback to in-memory image if no filename found
+                chosen = &it->second;
               }
-            }
-            if(chosen && !chosen->empty()) {
-              writer.processRGBImage(ts, *chosen);
+              if(chosen && !chosen->empty()) {
+                writer.processRGBImage(ts, *chosen);
+              }
             }
           }
           return true;

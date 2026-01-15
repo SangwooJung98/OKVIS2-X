@@ -177,14 +177,21 @@ private:
       std::shared_ptr<const okvis::MapPointVector> landmarks,
       std::vector<Eigen::Vector3d,
                   Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) const;
+  bool computeDepthPointCloudWorld(
+      const okvis::State& state,
+      const cv::Mat& depthImage,
+      std::vector<Eigen::Vector3d,
+                  Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) const;
   bool writePointCloud(
       const okvis::State& state,
       const std::vector<Eigen::Vector3d,
                         Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
       const std::string& imageName);
-  bool writeDepthPointCloud(const okvis::State& state,
-                            const cv::Mat& depthImage,
-                            const std::string& imageName);
+  bool writeDepthPointCloud(
+      const okvis::State& state,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+      const std::string& imageName);
   bool writeStateToJson(const okvis::State& state,
                         const std::string& imageName);
   void configureRealtimePublisherFromEnv();
@@ -197,7 +204,9 @@ private:
       const std::string& imageName,
       const cv::Mat& image,
       const std::vector<Eigen::Vector3d,
-                        Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld);
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+      const std::vector<Eigen::Vector3d,
+                        Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld);
 
   std::fstream csvFile_; ///< The CSV file.
   std::fstream rgbCsvFile_;  ///< The RGB CSV file.

@@ -62,6 +62,16 @@ int main(int argc, char **argv)
   const bool isDepth = parameters.lidar ? false : true;
   const bool isLidar = !isDepth;
   const bool isSubmapping = parameters.output.enable_submapping;
+  bool hasDepthCamera = false;
+  for(size_t camIdx = 0; camIdx < parameters.nCameraSystem.numCameras(); ++camIdx) {
+    if(parameters.nCameraSystem.isCameraConfigured(camIdx) &&
+       parameters.nCameraSystem.cameraType(camIdx).depthType.isDepthCamera) {
+      hasDepthCamera = true;
+      break;
+    }
+  }
+  const bool useDepthForSlam = isSubmapping && isDepth;
+  const bool streamDepthForOutput = hasDepthCamera;
 
   // dataset reader
   std::string path(argv[3]);
@@ -71,7 +81,10 @@ int main(int argc, char **argv)
     datasetReader.reset(new okvis::XDatasetReader(path, deltaT, parameters, isLidar, false, isDepth));
   }
   else {
-    datasetReader.reset(new okvis::XDatasetReader(path, deltaT, parameters, false, false, false));
+    datasetReader.reset(new okvis::XDatasetReader(path, deltaT, parameters, false, false, streamDepthForOutput));
+  }
+  if(streamDepthForOutput && !useDepthForSlam) {
+    LOG(INFO) << "[App] Depth streaming enabled for output only (not used in SLAM).";
   }
   
 
@@ -151,7 +164,10 @@ int main(int argc, char **argv)
             << ", exportCamIdx=" << exportCamIdx << ")";
   
   // save depth image (sw)
-  // writer->setDepthExportConfig(0.4, 10.0, 0.001, 50);
+  // writer->setDepthExportConfig(0.4, 10.0, 0.001, 50); // for real-sense
+  writer->setDepthExportConfig(0.4, 10.0,
+                               parameters.output.depth_export_scale,
+                               parameters.output.depth_export_stride);
 
   if (isSubmapping) {
     // Set callbacks in the estimator
@@ -182,43 +198,49 @@ int main(int argc, char **argv)
           std::bind(&okvis::ThreadedSlam::addImuMeasurement, estimator,
                     std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
   datasetReader->setImagesCallback(
-          [writer, estimator, datasetReader, exportCamIdx](const okvis::Time& ts,
+          [writer, estimator, datasetReader, exportCamIdx, useDepthForSlam](const okvis::Time& ts,
                               const std::map<size_t, cv::Mat>& images,
                               const std::map<size_t, cv::Mat>& depthImages){
-            // feed estimator
-            estimator->addImages(ts, images, depthImages);
-            // save a color image if available (prefer 3-channel), else first non-empty
+            // feed estimator (optionally skip depth)
+            if(useDepthForSlam) {
+              estimator->addImages(ts, images, depthImages);
+            } else {
+              estimator->addImages(ts, images, std::map<size_t, cv::Mat>{});
+            }
+            // save a color image for exportCamIdx only
             if(!images.empty()) {
-              // Try to reload original color image by filename to avoid grayscale feed
-              std::string fname;
-              cv::Mat colorImg;
-              for (const auto& kv : images) {
-                if(datasetReader->getLastImageFilename(kv.first, fname)) {
+              const auto it = images.find(exportCamIdx);
+              if(it != images.end() && !it->second.empty()) {
+                // Try to reload original color image by filename to avoid grayscale feed
+                std::string fname;
+                cv::Mat colorImg;
+                if(datasetReader->getLastImageFilename(exportCamIdx, fname)) {
                   colorImg = cv::imread(fname, cv::IMREAD_COLOR);
                 }
-                if(!colorImg.empty()) break;
-              }
-              const cv::Mat* chosen = nullptr;
-              if(!colorImg.empty()) {
-                chosen = &colorImg;
-              } else {
-                for (const auto& kv : images) {
-                  if(!kv.second.empty()) {
-                    chosen = &kv.second;
-                    break;
-                  }
+                const cv::Mat* chosen = nullptr;
+                if(!colorImg.empty()) {
+                  chosen = &colorImg;
+                } else {
+                  chosen = &it->second;
                 }
-              }
-              if(chosen && !chosen->empty()) {
-                writer->processRGBImage(ts, *chosen);
+                if(chosen && !chosen->empty()) {
+                  writer->processRGBImage(ts, *chosen);
+                }
               }
             }
 
             // save depth image (sw)
-            // auto itDepth = depthImages.find(exportCamIdx);
-            // if(itDepth != depthImages.end() && !itDepth->second.empty()) {
-            //   writer->processDepthImage(ts, exportCamIdx, itDepth->second);
-            // }
+            auto itDepth = depthImages.find(exportCamIdx);
+            if(itDepth == depthImages.end() && !depthImages.empty()) {
+              itDepth = depthImages.begin();
+              LOG_EVERY_N(INFO, 200)
+                  << "[DepthPC] exportCamIdx=" << exportCamIdx
+                  << " not found in depthImages; using camIdx="
+                  << itDepth->first << " instead.";
+            }
+            if(itDepth != depthImages.end() && !itDepth->second.empty()) {
+              writer->processDepthImage(ts, itDepth->first, itDepth->second);
+            }
             
             return true;
           });
@@ -271,6 +293,40 @@ int main(int argc, char **argv)
 
     // Start submapping interface
     seInterface->start();
+  }
+  else if(streamDepthForOutput) {
+    // Depth-only export when SLAM is not using depth.
+    datasetReader->setDepthImageCallback([&] (std::map<size_t, std::vector<okvis::CameraMeasurement>>& frames){
+      LOG_FIRST_N(INFO, 5) << "[DepthPC] Depth callback invoked (frames=" << frames.size()
+                           << ", exportCamIdx=" << exportCamIdx << ")";
+      bool saved = false;
+      for(const auto& cam_idx_frames : frames) {
+        if(cam_idx_frames.first != exportCamIdx) {
+          continue;
+        }
+        for(const auto& cam_measurement : cam_idx_frames.second) {
+          LOG_FIRST_N(INFO, 5) << "[DepthPC] Depth sample ts=" << cam_measurement.timeStamp
+                               << " camIdx=" << cam_idx_frames.first
+                               << " rows=" << cam_measurement.measurement.depthImage.rows
+                               << " cols=" << cam_measurement.measurement.depthImage.cols
+                               << " type=" << cam_measurement.measurement.depthImage.type()
+                               << " empty=" << cam_measurement.measurement.depthImage.empty();
+          if(!cam_measurement.measurement.depthImage.empty()) {
+            writer->processDepthImage(cam_measurement.timeStamp,
+                                      cam_idx_frames.first,
+                                      cam_measurement.measurement.depthImage);
+            LOG_FIRST_N(INFO, 5) << "[DepthPC] Queued depth ts=" << cam_measurement.timeStamp
+                                 << " camIdx=" << cam_idx_frames.first;
+            saved = true;
+            break;
+          }
+        }
+        if(saved) {
+          break;
+        }
+      }
+      return saved;
+    });
   }
 
   // Start streaming

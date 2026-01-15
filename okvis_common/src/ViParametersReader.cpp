@@ -353,6 +353,12 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
              viParameters_.output.display_overhead);
   parseEntry(file["output_parameters"], "enable_submapping",
              viParameters_.output.enable_submapping);
+  if(file["output_parameters"]["depth_export_scale"].isReal()){
+    file["output_parameters"]["depth_export_scale"] >> viParameters_.output.depth_export_scale;
+  }
+  if(file["output_parameters"]["depth_export_stride"].isInt()){
+    file["output_parameters"]["depth_export_stride"] >> viParameters_.output.depth_export_stride;
+  }
 
   // GPS Parameters
   if(file["gps_parameters"].isMap()){

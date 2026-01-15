@@ -42,12 +42,13 @@ struct FrameFixedPacked {
   uint32_t channels;
   uint32_t imageBytes;
   uint32_t pointCount;
+  uint32_t depthPointCount;
   uint32_t nameLength;
   double T_CW[16];
 };
 #pragma pack(pop)
 static_assert(sizeof(FrameFixedPacked) ==
-                  sizeof(uint64_t) + 7 * sizeof(uint32_t) + 16 * sizeof(double),
+                  sizeof(uint64_t) + 8 * sizeof(uint32_t) + 16 * sizeof(double),
               "FrameFixedPacked has unexpected padding");
 
 cv::Mat ensureBgr(const cv::Mat& image) {
@@ -121,6 +122,8 @@ void RealtimePublisher::submitFrame(
     const cv::Mat& imageBgr,
     const std::vector<Eigen::Vector3d,
                       Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld,
     const std::string& imageName) {
   if (!running_.load() || !isReady()) {
     return;
@@ -133,8 +136,8 @@ void RealtimePublisher::submitFrame(
     return;
   }
 
-  auto packet =
-      makeFramePacket(timestampNs, frameIdx, T_CW, bgr, pointsWorld, imageName);
+  auto packet = makeFramePacket(timestampNs, frameIdx, T_CW, bgr, pointsWorld,
+                                depthPointsWorld, imageName);
   if (packet.empty()) {
     return;
   }
@@ -288,6 +291,8 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
     const cv::Mat& imageBgr,
     const std::vector<Eigen::Vector3d,
                       Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld,
     const std::string& imageName) {
   std::vector<uint8_t> encoded;
   if (!cv::imencode(".png", imageBgr, encoded)) {
@@ -301,6 +306,8 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
   const uint32_t channels = static_cast<uint32_t>(imageBgr.channels());
   const uint32_t imageBytes = static_cast<uint32_t>(encoded.size());
   const uint32_t pointCount = static_cast<uint32_t>(pointsWorld.size());
+  const uint32_t depthPointCount =
+      static_cast<uint32_t>(depthPointsWorld.size());
   const uint32_t nameLength = static_cast<uint32_t>(imageName.size());
 
   std::vector<float> pointsFlat;
@@ -311,6 +318,14 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
     pointsFlat.push_back(static_cast<float>(pt[2]));
   }
 
+  std::vector<float> depthPointsFlat;
+  depthPointsFlat.reserve(depthPointsWorld.size() * 3);
+  for (const auto& pt : depthPointsWorld) {
+    depthPointsFlat.push_back(static_cast<float>(pt[0]));
+    depthPointsFlat.push_back(static_cast<float>(pt[1]));
+    depthPointsFlat.push_back(static_cast<float>(pt[2]));
+  }
+
   FrameFixedPacked fixed{};
   fixed.timestamp = timestampNs;
   fixed.frameIdx = frameIdx;
@@ -319,6 +334,7 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
   fixed.channels = channels;
   fixed.imageBytes = imageBytes;
   fixed.pointCount = pointCount;
+  fixed.depthPointCount = depthPointCount;
   fixed.nameLength = nameLength;
 
   Eigen::Map<Eigen::Matrix<double, 4, 4, Eigen::RowMajor>>(fixed.T_CW) =
@@ -326,7 +342,8 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
 
   std::vector<uint8_t> buffer(sizeof(PacketHeader));
   buffer.reserve(sizeof(PacketHeader) + sizeof(fixed) + nameLength +
-                 imageBytes + pointsFlat.size() * sizeof(float));
+                 imageBytes + pointsFlat.size() * sizeof(float) +
+                 depthPointsFlat.size() * sizeof(float));
   appendBytes(buffer, &fixed, sizeof(fixed));
   if (nameLength > 0) {
     appendBytes(buffer, imageName.data(), nameLength);
@@ -337,6 +354,10 @@ std::vector<uint8_t> RealtimePublisher::makeFramePacket(
   if (!pointsFlat.empty()) {
     appendBytes(buffer, pointsFlat.data(),
                 pointsFlat.size() * sizeof(float));
+  }
+  if (!depthPointsFlat.empty()) {
+    appendBytes(buffer, depthPointsFlat.data(),
+                depthPointsFlat.size() * sizeof(float));
   }
 
   PacketHeader header{kMagic, kVersion, kTypeFrame,

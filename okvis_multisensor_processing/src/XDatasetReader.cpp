@@ -185,6 +185,10 @@ bool XDatasetReader::startStreaming() {
       std::string s0, s1;
       std::getline(stream, s0, ',');
       std::getline(stream, s1);
+      // If the file is written in Windows. (\r\n)
+      if (!s1.empty() && s1.back() == '\r') {
+        s1 = s1.substr(0, s1.size() - 1);
+      }
       depthNames = std::make_pair(s0,s1);
       allDepthNames_.push_back(depthNames);
     }

@@ -147,6 +147,8 @@ struct OutputParameters {
     bool display_matches; ///< Displays debug video and matches. May be slow.
     bool display_overhead; ///< Debug overhead image. Is slow.
     bool enable_submapping; //< Whether or not is submapping enabled
+    double depth_export_scale = 1.0; ///< Depth export scale (meters per unit).
+    int depth_export_stride = 50; ///< Depth export pixel stride.
 };
 /**
   * @brief Struct to specify parameters of GPS sensor

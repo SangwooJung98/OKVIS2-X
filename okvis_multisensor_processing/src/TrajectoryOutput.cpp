@@ -292,8 +292,18 @@ void okvis::TrajectoryOutput::processState(
   std::vector<Eigen::Vector3d,
               Eigen::aligned_allocator<Eigen::Vector3d>>
       sparsePoints;
+  std::vector<Eigen::Vector3d,
+              Eigen::aligned_allocator<Eigen::Vector3d>>
+      depthPointsWorld;
   if ((pointCloudEnabled_ || wantsRealtimeStream) && validImageForOutputs) {
     collectLandmarkPoints(state, landmarks, sparsePoints);
+  }
+
+  if(depthPointCloudEnabled_ && validImageForOutputs && !depthImageResolved.empty()) {
+    if(!computeDepthPointCloudWorld(state, depthImageResolved, depthPointsWorld)) {
+      LOG_EVERY_N(WARNING, 200) << "Failed to build depth-based point cloud for frame "
+                                << state.id.value();
+    }
   }
 
   // per-frame sparse point cloud saving
@@ -307,7 +317,7 @@ void okvis::TrajectoryOutput::processState(
     cv::Mat streamImage;
     if(popStreamImage(timestampKey, streamImage) && !streamImage.empty()) {
       submitRealtimeFrame(state, imgIdx, imageNameResolved, streamImage,
-                          sparsePoints);
+                          sparsePoints, depthPointsWorld);
     } else {
       LOG_EVERY_N(WARNING, 200)
           << "[RealtimePublisher] Missing RGB buffer for timestamp "
@@ -316,7 +326,7 @@ void okvis::TrajectoryOutput::processState(
   }
 
   if(depthPointCloudEnabled_ && validImageForOutputs && !depthImageResolved.empty()) {
-    if(!writeDepthPointCloud(state, depthImageResolved, imageNameResolved)) {
+    if(!writeDepthPointCloud(state, depthPointsWorld, imageNameResolved)) {
       LOG_EVERY_N(WARNING, 200) << "Failed to write depth-based point cloud for frame "
                                 << state.id.value();
     }
@@ -408,10 +418,10 @@ bool okvis::TrajectoryOutput::processDepthImage(const okvis::Time& timestamp,
       depthImagesByStamp_.erase(depthImagesByStamp_.begin());
     }
   }
-  LOG(INFO) << "[DepthPC] buffered depth ts=" << toKey(timestamp)
-            << " camIdx=" << camIdx
-            << " rows=" << depthFloat.rows
-            << " cols=" << depthFloat.cols;
+  // LOG(INFO) << "[DepthPC] buffered depth ts=" << toKey(timestamp)
+  //           << " camIdx=" << camIdx
+  //           << " rows=" << depthFloat.rows
+  //           << " cols=" << depthFloat.cols;
   return true;
 }
 
@@ -828,6 +838,72 @@ void okvis::TrajectoryOutput::collectLandmarkPoints(
   }
 }
 
+bool okvis::TrajectoryOutput::computeDepthPointCloudWorld(
+    const okvis::State& state,
+    const cv::Mat& depthImage,
+    std::vector<Eigen::Vector3d,
+                Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) const {
+  pointsWorld.clear();
+  if(!jsonIntrinsics_.valid) {
+    LOG_EVERY_N(WARNING, 50)
+        << "[DepthPC] JSON intrinsics invalid. Cannot project depth.";
+    return false;
+  }
+  if(depthImage.empty()) {
+    LOG_EVERY_N(WARNING, 50) << "[DepthPC] depth image empty for frame "
+                             << state.id.value();
+    return false;
+  }
+
+  cv::Mat depthFloat;
+  if(depthImage.type() == CV_32F) {
+    depthFloat = depthImage.clone();
+  } else {
+    depthImage.convertTo(depthFloat, CV_32F);
+  }
+
+  const double fx = jsonIntrinsics_.fx;
+  const double fy = jsonIntrinsics_.fy;
+  const double cx = jsonIntrinsics_.cx;
+  const double cy = jsonIntrinsics_.cy;
+  okvis::kinematics::Transformation T_WC = state.T_WS * jsonT_SC_;
+  Eigen::Matrix4d T = T_WC.T();
+
+  const int stride = std::max(1, depthPixelStride_);
+  pointsWorld.reserve(static_cast<size_t>(depthFloat.rows) *
+                      static_cast<size_t>(depthFloat.cols) / stride);
+
+  for(int v = 0; v < depthFloat.rows; v += stride) {
+    const float* rowPtr = depthFloat.ptr<float>(v);
+    for(int u = 0; u < depthFloat.cols; u += stride) {
+      const float rawDepth = rowPtr[u];
+      if(!std::isfinite(rawDepth) || rawDepth <= 0.0f) {
+        continue;
+      }
+      const double depthMeters =
+          static_cast<double>(rawDepth) * depthScaleMetersPerUnit_;
+      if(depthMeters < depthMinRange_ || depthMeters > depthMaxRange_) {
+        continue;
+      }
+      const double z = depthMeters;
+      const double x = (static_cast<double>(u) - cx) / fx * z;
+      const double y = (static_cast<double>(v) - cy) / fy * z;
+      Eigen::Vector4d p_C;
+      p_C << x, y, z, 1.0;
+      Eigen::Vector4d p_W = T * p_C;
+      pointsWorld.emplace_back(p_W[0], p_W[1], p_W[2]);
+    }
+  }
+
+  if(pointsWorld.empty()) {
+    LOG_EVERY_N(INFO, 100)
+        << "[DepthPC] filtered depth produced zero points for frame "
+        << state.id.value();
+    return false;
+  }
+  return true;
+}
+
 bool okvis::TrajectoryOutput::writePointCloud(
     const okvis::State& state,
     const std::vector<Eigen::Vector3d,
@@ -866,7 +942,8 @@ bool okvis::TrajectoryOutput::writePointCloud(
 
 bool okvis::TrajectoryOutput::writeDepthPointCloud(
     const okvis::State& state,
-    const cv::Mat& depthImage,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
     const std::string& imageName) {
   (void) imageName;
   if(pointCloudDepthDir_.empty()) {
@@ -877,53 +954,7 @@ bool okvis::TrajectoryOutput::writeDepthPointCloud(
     LOG_EVERY_N(WARNING, 50) << "[DepthPC] image name empty for frame " << state.id.value();
     return false;
   }
-  if(!jsonIntrinsics_.valid) {
-    LOG_EVERY_N(WARNING, 50) << "[DepthPC] JSON intrinsics invalid. Cannot project depth.";
-    return false;
-  }
-
-  if(depthImage.empty()) {
-    LOG_EVERY_N(WARNING, 50) << "[DepthPC] depth image empty for frame " << state.id.value();
-    return false;
-  }
-
-  cv::Mat depthFloat;
-  if(depthImage.type() == CV_32F) {
-    depthFloat = depthImage.clone();
-  } else {
-    depthImage.convertTo(depthFloat, CV_32F);
-  }
-
-  std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> pointsCam;
-  pointsCam.reserve(static_cast<size_t>(depthFloat.rows) * static_cast<size_t>(depthFloat.cols) / (depthPixelStride_ > 0 ? depthPixelStride_ : 1));
-
-  const double fx = jsonIntrinsics_.fx;
-  const double fy = jsonIntrinsics_.fy;
-  const double cx = jsonIntrinsics_.cx;
-  const double cy = jsonIntrinsics_.cy;
-  okvis::kinematics::Transformation T_WC = state.T_WS * jsonT_SC_;
-  Eigen::Matrix4d T = T_WC.T();
-
-  const int stride = std::max(1, depthPixelStride_);
-  for(int v = 0; v < depthFloat.rows; v += stride) {
-    const float* rowPtr = depthFloat.ptr<float>(v);
-    for(int u = 0; u < depthFloat.cols; u += stride) {
-      const float rawDepth = rowPtr[u];
-      if(!std::isfinite(rawDepth) || rawDepth <= 0.0f) {
-        continue;
-      }
-      const double depthMeters = static_cast<double>(rawDepth) * depthScaleMetersPerUnit_;
-      if(depthMeters < depthMinRange_ || depthMeters > depthMaxRange_) {
-        continue;
-      }
-      const double z = depthMeters;
-      const double x = (static_cast<double>(u) - cx) / fx * z;
-      const double y = (static_cast<double>(v) - cy) / fy * z;
-      pointsCam.emplace_back(x, y, z);
-    }
-  }
-
-  if(pointsCam.empty()) {
+  if(pointsWorld.empty()) {
     LOG_EVERY_N(INFO, 100) << "[DepthPC] filtered depth produced zero points for frame "
                            << state.id.value();
     return false;
@@ -937,16 +968,13 @@ bool okvis::TrajectoryOutput::writeDepthPointCloud(
     return false;
   }
 
-  for(const auto& pt : pointsCam) {
-    Eigen::Vector4d p_C;
-    p_C << pt[0], pt[1], pt[2], 1.0;
-    Eigen::Vector4d p_W = T * p_C;
-    ofsTxt << p_W[0] << " " << p_W[1] << " " << p_W[2] << "\n";
+  for(const auto& pt : pointsWorld) {
+    ofsTxt << pt[0] << " " << pt[1] << " " << pt[2] << "\n";
   }
   ofsTxt.close();
 
-  LOG(INFO) << "Saved depth-based sparse point cloud for frame " << state.id.value()
-            << " with " << pointsCam.size() << " points.";
+  // LOG(INFO) << "Saved depth-based sparse point cloud for frame " << state.id.value()
+  //           << " with " << pointsWorld.size() << " points.";
   return true;
 }
 
@@ -1040,7 +1068,9 @@ void okvis::TrajectoryOutput::submitRealtimeFrame(
     const std::string& imageName,
     const cv::Mat& image,
     const std::vector<Eigen::Vector3d,
-                      Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld) {
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& pointsWorld,
+    const std::vector<Eigen::Vector3d,
+                      Eigen::aligned_allocator<Eigen::Vector3d>>& depthPointsWorld) {
   if(!realtimePublisher_ || !realtimePublisher_->isReady()) {
     LOG(WARNING) << "[RealtimePublisher] submitRealtimeFrame skipped (publisher not ready).";
     return;
@@ -1058,8 +1088,10 @@ void okvis::TrajectoryOutput::submitRealtimeFrame(
       T,
       image,
       pointsWorld,
+      depthPointsWorld,
       imageName);
-  LOG(INFO) << "[RealtimePublisher] Submitted frame idx=" << frameIdx
-            << " ts=" << toKey(state.timestamp)
-            << " pts=" << pointsWorld.size();
+  // LOG(INFO) << "[RealtimePublisher] Submitted frame idx=" << frameIdx
+  //           << " ts=" << toKey(state.timestamp)
+  //           << " pts=" << pointsWorld.size()
+  //           << " depth_pts=" << depthPointsWorld.size();
 }
